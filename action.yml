@@ -1,0 +1,93 @@
+name: "Website to APK Action"
+description: "Builds an Android APK from a web build folder, or wraps a live website URL."
+branding:
+  color: 'blue'
+  icon: 'smartphone'
+inputs:
+  build-folder-path:
+    description: "Path to build folder (used when server-url is empty)"
+    required: false
+    default: "build"
+  app-name:
+    description: "Name of the app"
+    required: false
+    default: "MyApp"
+  app-id:
+    description: "Android package id, e.g. com.rupianii.app (derived from app-name if empty)"
+    required: false
+    default: ""
+  server-url:
+    description: "If set, the app loads this live website (https only) instead of bundled files"
+    required: false
+    default: ""
+  icon-path:
+    description: "Path to a 1024x1024 PNG used to generate launcher icons (optional)"
+    required: false
+    default: ""
+  output-folder-path:
+    description: "Path to output folder"
+    required: false
+    default: "apk"
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Prepare Capacitor project
+      shell: bash
+      env:
+        IN_BUILD: ${{ inputs.build-folder-path }}
+        IN_NAME: ${{ inputs.app-name }}
+        IN_ID: ${{ inputs.app-id }}
+        IN_URL: ${{ inputs.server-url }}
+        IN_ICON: ${{ inputs.icon-path }}
+        WORKSPACE: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        mkdir -p cap/www cap/assets
+        cp -r "$WORKSPACE/$IN_BUILD"/. cap/www/
+        [ -n "$IN_ICON" ] && cp "$WORKSPACE/$IN_ICON" cap/assets/icon-only.png || true
+        cd cap
+        npm init -y >/dev/null
+        npm install --silent @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 @capacitor/assets@3
+        node -e '
+          const name = process.env.IN_NAME;
+          let id = process.env.IN_ID || ("com." + name.toLowerCase().replace(/[^a-z0-9]/g,"") + ".app");
+          if (!/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/.test(id)) { console.error("Invalid app-id: " + id); process.exit(1); }
+          const cfg = { appId: id, appName: name, webDir: "www" };
+          if (process.env.IN_URL) {
+            if (!/^https:\/\//.test(process.env.IN_URL)) { console.error("server-url must be https"); process.exit(1); }
+            cfg.server = { url: process.env.IN_URL, cleartext: false };
+          }
+          require("fs").writeFileSync("capacitor.config.json", JSON.stringify(cfg, null, 2));
+        '
+        cat capacitor.config.json
+        npx cap add android
+        if [ -f assets/icon-only.png ]; then
+          npx capacitor-assets generate --android --iconBackgroundColor '#023a2e' --iconBackgroundColorDark '#023a2e'
+        fi
+        npx cap sync android
+
+    - name: Build APKs
+      shell: bash
+      working-directory: cap/android
+      run: |
+        chmod +x gradlew
+        ./gradlew assembleDebug assembleRelease
+
+    - name: Copy APKs to output folder
+      shell: bash
+      env:
+        OUT: ${{ inputs.output-folder-path }}
+      run: |
+        mkdir -p "$OUT"
+        find cap/android/app/build/outputs/apk -name '*.apk' -exec cp {} "$OUT"/ \;
+        ls -la "$OUT"
